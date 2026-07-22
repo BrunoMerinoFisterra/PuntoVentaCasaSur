@@ -9,7 +9,7 @@
  *   - fechas en aaaa-mm-dd (la doc decía dd/mm/aaaa, pero lo que funciona es ISO)
  *   - alias de campos (ClienteCodigo, Productos, Cantidad, ...)
  *   - subtipo del Excel o PTOVTA-FV cuando la columna no existe/esta vacia
- *   - pago Visa en PuntoVentaItemsTarjeta para TC/TD + 9520 VISA
+ *   - todo pago TC/TD usa PuntoVentaItemsTarjeta con cuenta 13100
  *   - los demas pagos usan PuntoVentaItemsOtros contra la cuenta TCV
  *   - el arreglo Conceptos se omite por completo
  *   - totales como strings
@@ -29,9 +29,8 @@ const CONFIG = {
   // Cuenta puente para el cobro con tarjeta (PuntoVentaItemsOtros)
   CUENTA_PAGO_OTROS: 'TCV',
   // Regla de tarjeta informada por el circuito de punto de venta.
-  TARJETA_VISA: {
+  TARJETA: {
     CONDICION_PAGO: 'TC/TD',
-    COMPROBANTE_ADICIONAL: '9520 VISA',
     CUENTA: '13100',
   },
   EFECTIVO: {
@@ -92,11 +91,8 @@ function normalizeCode(value) {
   return str == null ? null : str.replace(/\s+/g, ' ').toUpperCase();
 }
 
-function esPagoTarjetaVisa(row) {
-  return (
-    normalizeCode(row.CONDICIONPAGO) === CONFIG.TARJETA_VISA.CONDICION_PAGO &&
-    normalizeCode(row.COMPROBANTEADICIONAL) === CONFIG.TARJETA_VISA.COMPROBANTE_ADICIONAL
-  );
+function esPagoTarjeta(row) {
+  return normalizeCode(row.CONDICIONPAGO) === CONFIG.TARJETA.CONDICION_PAGO;
 }
 
 function esPagoContado(row) {
@@ -184,7 +180,7 @@ function buildPedidos(rows, defaults = {}) {
     const comprobante = toStringOrNull(head.COMPROBANTE);
     const moneda = toStringOrNull(head.MONEDA);
     const condicionPago = toStringOrNull(head.CONDICIONPAGO);
-    const pagoTarjetaVisa = esPagoTarjetaVisa(head);
+    const pagoTarjeta = esPagoTarjeta(head);
     const pagoContado = esPagoContado(head);
     const cuentaCorriente = esCuentaCorriente(head);
     const fechaPago = toIsoDate(head.FECHA);
@@ -229,11 +225,11 @@ function buildPedidos(rows, defaults = {}) {
           ImporteExento: precio != null && cantidad != null ? round2(precio * cantidad) : null,
         };
       }),
-      PuntoVentaItemsTarjeta: pagoTarjetaVisa
+      PuntoVentaItemsTarjeta: pagoTarjeta
         ? [
             {
               OperacionBancariaCodigo: condicionPago,
-              CuentaCodigo: CONFIG.TARJETA_VISA.CUENTA,
+              CuentaCodigo: CONFIG.TARJETA.CUENTA,
               Descripcion: toStringOrNull(head.COMPROBANTEADICIONAL),
               FechaCupon: fechaPago,
               FechaVencimientoTarjeta: fechaPago,
@@ -253,7 +249,7 @@ function buildPedidos(rows, defaults = {}) {
             },
           ]
         : null,
-      PuntoVentaItemsOtros: pagoTarjetaVisa || pagoContado || cuentaCorriente
+      PuntoVentaItemsOtros: pagoTarjeta || pagoContado || cuentaCorriente
         ? null
         : [
             {

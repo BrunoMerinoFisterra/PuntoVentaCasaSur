@@ -37,7 +37,7 @@ Además el payload incluye automáticamente (según JSON validado contra el tena
 
 - `TransaccionTipoCodigo: OPER` y `WorkflowCodigo` tomado de la columna `WORKFLOW` del Excel.
 - El arreglo `Conceptos` se omite por completo del JSON.
-- Cuando `CONDICIONPAGO` es `TC/TD` y `COMPROBANTEADICIONAL` es `9520 VISA`, el cobro se genera en `PuntoVentaItemsTarjeta` con `OperacionBancariaCodigo` tomado de `CONDICIONPAGO` y cuenta `13100`; `COMPROBANTEADICIONAL` se copia en `Descripcion`, `CLIENTE` se usa como documento del titular y `COMPROBANTE`, conservando solo sus digitos y sin ceros iniciales, como numero de cupon.
+- Cuando `CONDICIONPAGO` es `TC/TD`, sin importar `COMPROBANTEADICIONAL`, el cobro se genera en `PuntoVentaItemsTarjeta` con `OperacionBancariaCodigo` tomado de `CONDICIONPAGO` y cuenta `13100`; `COMPROBANTEADICIONAL` se copia en `Descripcion`, `CLIENTE` se usa como documento del titular y `COMPROBANTE`, conservando solo sus digitos y sin ceros iniciales, como numero de cupon.
 - Cuando `CONDICIONPAGO` es `CONTADO`, se genera unicamente `PuntoVentaItemsEfectivo`: para moneda `PES` usa la cuenta `10000` y para `DOL` la cuenta `10010`.
 - Cuando `CONDICIONPAGO` es `CTACTE`, no se incluye ningun arreglo de cobro.
 - Los demas cobros se generan como `PuntoVentaItemsOtros` contra la cuenta puente `TCV` por el total del comprobante.
