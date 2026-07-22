@@ -1,0 +1,7 @@
+node_modules/
+uploads/
+.env
+
+# Archivos de datos con información personal (huéspedes, CUITs)
+*.xlsx
+*.xls
