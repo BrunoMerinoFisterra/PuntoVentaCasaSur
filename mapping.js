@@ -8,7 +8,7 @@
  * La estructura replica un JSON validado contra el tenant (2026-07):
  *   - fechas en aaaa-mm-dd (la doc decía dd/mm/aaaa, pero lo que funciona es ISO)
  *   - alias de campos (ClienteCodigo, Productos, Cantidad, ...)
- *   - subtipo PTOVTA-FV-OPERA y WorkflowCodigo VTASPTOVTA
+ *   - subtipo del Excel o PTOVTA-FV cuando la columna no existe/esta vacia
  *   - pago Visa en PuntoVentaItemsTarjeta para TC/TD + 9520 VISA
  *   - los demas pagos usan PuntoVentaItemsOtros contra la cuenta TCV
  *   - el arreglo Conceptos se omite por completo
@@ -19,11 +19,10 @@ const XLSX = require('xlsx');
 
 const CONFIG = {
   TRANSACCION_TIPO: 'OPER',
-  WORKFLOW_CODIGO: 'VTASPTOVTA',
   // Empresa fija requerida para todos los puntos de venta generados.
   EMPRESA_CODIGO: 'ejemplo',
   // Subtipo del circuito de punto de venta (sobreescribible desde la UI)
-  SUBTIPO_DEFAULT: 'PTOVTA-FV-OPERA',
+  SUBTIPO_DEFAULT: 'PTOVTA-FV',
   // Tipo impositivo según la letra del comprobante (B-00003-... → B).
   // Letras sin entrada (ej: T) hacen que el campo se omita (es opcional).
   TIPO_IMPOSITIVO_POR_LETRA: { A: '001', B: '006' },
@@ -33,9 +32,16 @@ const CONFIG = {
   TARJETA_VISA: {
     CONDICION_PAGO: 'TC/TD',
     COMPROBANTE_ADICIONAL: '9520 VISA',
-    OPERACION_BANCARIA: 'TC/TD VISA',
     CUENTA: '13100',
   },
+  EFECTIVO: {
+    CONDICION_PAGO: 'CONTADO',
+    CUENTAS_POR_MONEDA: {
+      PES: '10000',
+      DOL: '10010',
+    },
+  },
+  CONDICION_CUENTA_CORRIENTE: 'CTACTE',
   // Los códigos de vendedor del Excel (251, 263, ...) no existen en el
   // tenant, así que el vendedor se omite. Poné un código válido (ej:
   // 'GTC_02') para enviarlo fijo en todos los comprobantes.
@@ -91,6 +97,14 @@ function esPagoTarjetaVisa(row) {
     normalizeCode(row.CONDICIONPAGO) === CONFIG.TARJETA_VISA.CONDICION_PAGO &&
     normalizeCode(row.COMPROBANTEADICIONAL) === CONFIG.TARJETA_VISA.COMPROBANTE_ADICIONAL
   );
+}
+
+function esPagoContado(row) {
+  return normalizeCode(row.CONDICIONPAGO) === CONFIG.EFECTIVO.CONDICION_PAGO;
+}
+
+function esCuentaCorriente(row) {
+  return normalizeCode(row.CONDICIONPAGO) === CONFIG.CONDICION_CUENTA_CORRIENTE;
 }
 
 /** Deja solo digitos y elimina ceros a la izquierda (conserva "0" si todos son cero). */
@@ -154,7 +168,7 @@ function tipoImpositivoDeComprobante(comprobante) {
  * payload de puntoVenta por grupo.
  *
  * @param rows filas normalizadas del Excel
- * @param defaults valores opcionales desde la UI: { empresaId, subtipoId }
+ * @param defaults valores opcionales desde la UI (reservado por compatibilidad)
  */
 function buildPedidos(rows, defaults = {}) {
   const grupos = new Map();
@@ -171,7 +185,10 @@ function buildPedidos(rows, defaults = {}) {
     const moneda = toStringOrNull(head.MONEDA);
     const condicionPago = toStringOrNull(head.CONDICIONPAGO);
     const pagoTarjetaVisa = esPagoTarjetaVisa(head);
+    const pagoContado = esPagoContado(head);
+    const cuentaCorriente = esCuentaCorriente(head);
     const fechaPago = toIsoDate(head.FECHA);
+    const cuentaEfectivo = CONFIG.EFECTIVO.CUENTAS_POR_MONEDA[normalizeCode(moneda)] ?? null;
 
     const total = round2(
       filas.reduce((sum, { row }) => {
@@ -191,11 +208,9 @@ function buildPedidos(rows, defaults = {}) {
       MonedaCodigo: moneda,
       ComprobanteTipoImpositivoID: tipoImpositivoDeComprobante(comprobante),
       TransaccionTipoCodigo: CONFIG.TRANSACCION_TIPO,
-      WorkflowCodigo: CONFIG.WORKFLOW_CODIGO,
+      WorkflowCodigo: toStringOrNull(head.WORKFLOW),
       TransaccionSubtipoCodigo:
-        toStringOrNull(head.TRANSACCIONSUBTIPO) ??
-        toStringOrNull(defaults.subtipoId) ??
-        CONFIG.SUBTIPO_DEFAULT,
+        toStringOrNull(head.TRANSACCIONSUBTIPO) ?? CONFIG.SUBTIPO_DEFAULT,
       Descripcion: toStringOrNull(head.DESCRIPCION),
       NumeroComprobante: comprobante,
       EmpresaCodigo: CONFIG.EMPRESA_CODIGO,
@@ -217,8 +232,9 @@ function buildPedidos(rows, defaults = {}) {
       PuntoVentaItemsTarjeta: pagoTarjetaVisa
         ? [
             {
-              OperacionBancariaCodigo: CONFIG.TARJETA_VISA.OPERACION_BANCARIA,
+              OperacionBancariaCodigo: condicionPago,
               CuentaCodigo: CONFIG.TARJETA_VISA.CUENTA,
+              Descripcion: toStringOrNull(head.COMPROBANTEADICIONAL),
               FechaCupon: fechaPago,
               FechaVencimientoTarjeta: fechaPago,
               DocumentoTitular: toStringOrNull(head.CLIENTE),
@@ -228,7 +244,16 @@ function buildPedidos(rows, defaults = {}) {
             },
           ]
         : null,
-      PuntoVentaItemsOtros: pagoTarjetaVisa
+      PuntoVentaItemsEfectivo: pagoContado
+        ? [
+            {
+              ImporteACobrar: total.toFixed(4),
+              MonedaCobroCodigo: moneda,
+              CuentaCodigo: cuentaEfectivo,
+            },
+          ]
+        : null,
+      PuntoVentaItemsOtros: pagoTarjetaVisa || pagoContado || cuentaCorriente
         ? null
         : [
             {
