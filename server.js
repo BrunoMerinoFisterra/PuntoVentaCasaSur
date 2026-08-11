@@ -57,7 +57,11 @@ app.post('/api/parse', upload.single('archivo'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No se recibió ningún archivo.' });
     const rows = parseRows(req.file.buffer);
     if (!rows.length) return res.status(400).json({ error: 'El archivo no tiene filas de datos.' });
-    const defaults = { empresaId: req.body.empresaId || null, subtipoId: req.body.subtipoId || null };
+    const defaults = {
+      empresaId: req.body.empresaId || null,
+      subtipoId: req.body.subtipoId || null,
+      subtipoNotaCreditoId: req.body.subtipoNotaCreditoId || null,
+    };
     const pedidos = buildPedidos(rows, defaults);
     res.json({ archivo: req.file.originalname, filas: rows.length, pedidos });
   } catch (err) {

@@ -27,16 +27,20 @@ Una fila por ítem. Filas con el mismo `NUMERO` forman un mismo punto de venta. 
 | CLIENTE | `ClienteCodigo` |
 | CONDICIONPAGO | `CondicionPagoCodigo` |
 | MONEDA | `MonedaCodigo` |
-| TRANSACCIONSUBTIPO | `TransaccionSubtipoCodigo` (si falta o está vacía, se usa `PTOVTA-FV`) |
+| TIPO COMPROBANTE | Define `TransaccionSubtipoCodigo`: `FC` usa el valor por defecto (`PTOVTA-FV`) y `NC` usa el valor de nota de crédito (`PTOVTA-NC`) |
+| TRANSACCIONSUBTIPO | Solo se usa como respaldo cuando `TIPO COMPROBANTE` no es `FC` ni `NC` |
 | DESCRIPCION | `Descripcion` |
 | SUCURSAL | No se utiliza: `EmpresaCodigo` se fija en `ejemplo` |
 | MONEDA_COTIZACION + COTIZACION | `Cotizaciones` |
-| PRODUCTO / DESCRIPCIONITEM / CANTIDAD / PRECIO | ítem en `Productos` (`ProductoCodigo`, `Descripcion`, `Cantidad`, `Precio`, con `ImporteExento` = precio × cantidad) |
+| PRODUCTO / DESCRIPCIONITEM / CANTIDAD / PRECIO | ítem en `Productos` (`ProductoCodigo`, `Descripcion`, `Cantidad`, `Precio`) |
+| PORCENTAJE / IVA | `Conceptos`; 21% usa `VENTA_IVA 21`, 10,5% usa `VENTA_IVA 10,5` y 0% se registra como `ImporteExento` del producto |
 
 Además el payload incluye automáticamente (según JSON validado contra el tenant):
 
 - `TransaccionTipoCodigo: OPER` y `WorkflowCodigo` tomado de la columna `WORKFLOW` del Excel.
-- El arreglo `Conceptos` se omite por completo del JSON.
+- `Conceptos` agrupa por alícuota los importes de `IVA` y las bases gravadas (`PRECIO` × `CANTIDAD`). Las filas con 0% no generan conceptos y se informan como importes exentos.
+- Para alícuota 21%, todos los comprobantes generan `VENTA_IVA 21`. Si `COMPROBANTE` comienza con `T`, además se genera `VENTA_IVA21_T` usando el importe de `REINTEGRO` del Excel.
+- Cuando `TIPO COMPROBANTE` es `NC`, todos los importes se envían en valor absoluto: precios, bases gravadas, conceptos, totales y cobros quedan positivos.
 - Cuando `CONDICIONPAGO` es `TC/TD`, sin importar `COMPROBANTEADICIONAL`, el cobro se genera en `PuntoVentaItemsTarjeta` con `OperacionBancariaCodigo` tomado de `CONDICIONPAGO` y cuenta `13100`; `COMPROBANTEADICIONAL` se copia en `Descripcion`, `CLIENTE` se usa como documento del titular y `COMPROBANTE`, conservando solo sus digitos y sin ceros iniciales, como numero de cupon.
 - Cuando `CONDICIONPAGO` es `CONTADO`, se genera unicamente `PuntoVentaItemsEfectivo`: para moneda `PES` usa la cuenta `10000` y para `DOL` la cuenta `10010`.
 - Cuando `CONDICIONPAGO` es `CTACTE`, no se incluye ningun arreglo de cobro.

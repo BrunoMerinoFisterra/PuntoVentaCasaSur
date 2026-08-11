@@ -64,6 +64,7 @@ btnParse.addEventListener('click', async () => {
     form.append('archivo', archivo);
     form.append('empresaId', $('empresaId').value.trim());
     form.append('subtipoId', $('subtipoId').value.trim());
+    form.append('subtipoNotaCreditoId', $('subtipoNotaCreditoId').value.trim());
     const res = await fetch('/api/parse', { method: 'POST', body: form });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Error HTTP ${res.status}`);
