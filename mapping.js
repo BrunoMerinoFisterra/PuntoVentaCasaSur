@@ -9,9 +9,9 @@
  *   - fechas en aaaa-mm-dd (la doc decía dd/mm/aaaa, pero lo que funciona es ISO)
  *   - alias de campos (ClienteCodigo, Productos, Cantidad, ...)
  *   - subtipo del Excel o PTOVTA-FV cuando la columna no existe/esta vacia
- *   - pago Visa en PuntoVentaItemsTarjeta para TC/TD + 9520 VISA
+ *   - todo pago TC/TD usa PuntoVentaItemsTarjeta con cuenta 13100
  *   - los demas pagos usan PuntoVentaItemsOtros contra la cuenta TCV
- *   - el arreglo Conceptos se omite por completo
+ *   - Conceptos se genera segun PORCENTAJE (21% o 10,5%); 0% es exento
  *   - totales como strings
  */
 
@@ -23,15 +23,15 @@ const CONFIG = {
   EMPRESA_CODIGO: 'ejemplo',
   // Subtipo del circuito de punto de venta (sobreescribible desde la UI)
   SUBTIPO_DEFAULT: 'PTOVTA-FV',
+  SUBTIPO_NOTA_CREDITO_DEFAULT: 'PTOVTA-NC',
   // Tipo impositivo según la letra del comprobante (B-00003-... → B).
   // Letras sin entrada (ej: T) hacen que el campo se omita (es opcional).
   TIPO_IMPOSITIVO_POR_LETRA: { A: '001', B: '006' },
   // Cuenta puente para el cobro con tarjeta (PuntoVentaItemsOtros)
   CUENTA_PAGO_OTROS: 'TCV',
   // Regla de tarjeta informada por el circuito de punto de venta.
-  TARJETA_VISA: {
+  TARJETA: {
     CONDICION_PAGO: 'TC/TD',
-    COMPROBANTE_ADICIONAL: '9520 VISA',
     CUENTA: '13100',
   },
   EFECTIVO: {
@@ -42,6 +42,11 @@ const CONFIG = {
     },
   },
   CONDICION_CUENTA_CORRIENTE: 'CTACTE',
+  CONCEPTOS_POR_TASA: {
+    '10.5': { codigo: 'VENTA_IVA 10,5', tasa: 10.5 },
+    '21': { codigo: 'VENTA_IVA 21', tasa: 21 },
+  },
+  CONCEPTO_IVA_21_DOCUMENTO_T: 'VENTA_IVA21_T',
   // Los códigos de vendedor del Excel (251, 263, ...) no existen en el
   // tenant, así que el vendedor se omite. Poné un código válido (ej:
   // 'GTC_02') para enviarlo fijo en todos los comprobantes.
@@ -92,11 +97,8 @@ function normalizeCode(value) {
   return str == null ? null : str.replace(/\s+/g, ' ').toUpperCase();
 }
 
-function esPagoTarjetaVisa(row) {
-  return (
-    normalizeCode(row.CONDICIONPAGO) === CONFIG.TARJETA_VISA.CONDICION_PAGO &&
-    normalizeCode(row.COMPROBANTEADICIONAL) === CONFIG.TARJETA_VISA.COMPROBANTE_ADICIONAL
-  );
+function esPagoTarjeta(row) {
+  return normalizeCode(row.CONDICIONPAGO) === CONFIG.TARJETA.CONDICION_PAGO;
 }
 
 function esPagoContado(row) {
@@ -105,6 +107,10 @@ function esPagoContado(row) {
 
 function esCuentaCorriente(row) {
   return normalizeCode(row.CONDICIONPAGO) === CONFIG.CONDICION_CUENTA_CORRIENTE;
+}
+
+function tipoComprobanteCodigo(row) {
+  return normalizeCode(row['TIPO COMPROBANTE'] ?? row['TIPO DE COMPROBANTE']);
 }
 
 /** Deja solo digitos y elimina ceros a la izquierda (conserva "0" si todos son cero). */
@@ -117,6 +123,78 @@ function toNumericCode(value) {
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
+const round4 = (n) => Math.round(n * 10000) / 10000;
+
+/** Convierte "21%" o "10,5%" a una tasa numerica. */
+function toTaxRate(value) {
+  const str = toStringOrNull(value);
+  if (str == null) return null;
+  const rate = Number(str.replace('%', '').replace(',', '.').trim());
+  return Number.isFinite(rate) ? rate : null;
+}
+
+function conceptoConfigPorTasa(rate) {
+  if (rate == null) return null;
+  return CONFIG.CONCEPTOS_POR_TASA[String(rate)] ?? null;
+}
+
+function buildConceptos(filas, comprobante) {
+  const acumulados = new Map();
+
+  for (const { row, excelRow } of filas) {
+    const tasa = toTaxRate(row.PORCENTAJE);
+    if (tasa == null || tasa === 0) continue;
+
+    const config = conceptoConfigPorTasa(tasa);
+    if (!config) {
+      throw new Error(`Porcentaje impositivo no soportado en la fila ${excelRow}: ${row.PORCENTAJE}`);
+    }
+
+    const cantidad = toNumberOrNull(row.CANTIDAD) ?? 0;
+    const precio = toNumberOrNull(row.PRECIO) ?? 0;
+    const importeIva = toNumberOrNull(row.IVA) ?? 0;
+    const importeReintegro = toNumberOrNull(row.REINTEGRO) ?? 0;
+    const actual = acumulados.get(String(config.tasa)) ?? {
+      config,
+      importe: 0,
+      reintegro: 0,
+      gravado: 0,
+    };
+
+    actual.importe += importeIva;
+    actual.reintegro += importeReintegro;
+    actual.gravado += cantidad * precio;
+    acumulados.set(String(config.tasa), actual);
+  }
+
+  const conceptos = [];
+  const comprobanteT = String(comprobante ?? '').trim().toUpperCase().startsWith('T');
+
+  for (const config of Object.values(CONFIG.CONCEPTOS_POR_TASA)) {
+    const acumulado = acumulados.get(String(config.tasa));
+    if (!acumulado) continue;
+
+    conceptos.push({
+      ConceptoCodigo: config.codigo,
+      ImporteEditable: false,
+      ConceptoImporte: round4(acumulado.importe),
+      ConceptoImporteGravado: round4(acumulado.gravado),
+      TasaImpositiva: config.tasa,
+    });
+
+    if (config.tasa === 21 && comprobanteT) {
+      conceptos.push({
+        ConceptoCodigo: CONFIG.CONCEPTO_IVA_21_DOCUMENTO_T,
+        ImporteEditable: false,
+        ConceptoImporte: round4(acumulado.reintegro),
+        ConceptoImporteGravado: round4(acumulado.gravado),
+        TasaImpositiva: config.tasa,
+      });
+    }
+  }
+
+  return conceptos;
+}
 
 /** Elimina claves null/undefined/'' y arrays vacíos (0 y false se conservan). */
 function cleanObject(obj) {
@@ -184,19 +262,36 @@ function buildPedidos(rows, defaults = {}) {
     const comprobante = toStringOrNull(head.COMPROBANTE);
     const moneda = toStringOrNull(head.MONEDA);
     const condicionPago = toStringOrNull(head.CONDICIONPAGO);
-    const pagoTarjetaVisa = esPagoTarjetaVisa(head);
+    const pagoTarjeta = esPagoTarjeta(head);
     const pagoContado = esPagoContado(head);
     const cuentaCorriente = esCuentaCorriente(head);
+    const tipoComprobante = tipoComprobanteCodigo(head);
     const fechaPago = toIsoDate(head.FECHA);
     const cuentaEfectivo = CONFIG.EFECTIVO.CUENTAS_POR_MONEDA[normalizeCode(moneda)] ?? null;
 
-    const total = round2(
+    const notaCredito = tipoComprobante === 'NC';
+    const totalBrutoConSigno = round2(
       filas.reduce((sum, { row }) => {
         const cant = toNumberOrNull(row.CANTIDAD) ?? 0;
         const precio = toNumberOrNull(row.PRECIO) ?? 0;
         return sum + cant * precio;
       }, 0)
     );
+    const conceptosConSigno = buildConceptos(filas, comprobante);
+    const totalConceptosConSigno = round2(
+      conceptosConSigno.reduce((sum, concepto) => sum + concepto.ConceptoImporte, 0)
+    );
+    const totalConSigno = round2(totalBrutoConSigno + totalConceptosConSigno);
+    const conceptos = notaCredito
+      ? conceptosConSigno.map((concepto) => ({
+          ...concepto,
+          ConceptoImporte: Math.abs(concepto.ConceptoImporte),
+          ConceptoImporteGravado: Math.abs(concepto.ConceptoImporteGravado),
+        }))
+      : conceptosConSigno;
+    const totalBruto = notaCredito ? Math.abs(totalBrutoConSigno) : totalBrutoConSigno;
+    const totalConceptos = notaCredito ? Math.abs(totalConceptosConSigno) : totalConceptosConSigno;
+    const total = notaCredito ? Math.abs(totalConSigno) : totalConSigno;
 
     const payload = cleanObject({
       IdentificacionExterna: comprobante ?? `PV-${numero}`,
@@ -210,14 +305,25 @@ function buildPedidos(rows, defaults = {}) {
       TransaccionTipoCodigo: CONFIG.TRANSACCION_TIPO,
       WorkflowCodigo: toStringOrNull(head.WORKFLOW),
       TransaccionSubtipoCodigo:
-        toStringOrNull(head.TRANSACCIONSUBTIPO) ?? CONFIG.SUBTIPO_DEFAULT,
+        tipoComprobante === 'NC'
+          ? toStringOrNull(defaults.subtipoNotaCreditoId) ?? CONFIG.SUBTIPO_NOTA_CREDITO_DEFAULT
+          : tipoComprobante === 'FC'
+            ? toStringOrNull(defaults.subtipoId) ?? CONFIG.SUBTIPO_DEFAULT
+            : toStringOrNull(head.TRANSACCIONSUBTIPO) ??
+              toStringOrNull(defaults.subtipoId) ??
+              CONFIG.SUBTIPO_DEFAULT,
       Descripcion: toStringOrNull(head.DESCRIPCION),
       NumeroComprobante: comprobante,
       EmpresaCodigo: CONFIG.EMPRESA_CODIGO,
       VendedorCodigo: CONFIG.VENDEDOR_DEFAULT,
       Productos: filas.map(({ row }) => {
         const cantidad = toNumberOrNull(row.CANTIDAD);
-        const precio = toNumberOrNull(row.PRECIO);
+        const precioOriginal = toNumberOrNull(row.PRECIO);
+        const precio = notaCredito && precioOriginal != null ? Math.abs(precioOriginal) : precioOriginal;
+        const tasa = toTaxRate(row.PORCENTAJE);
+        const importeOriginal =
+          precioOriginal != null && cantidad != null ? round2(precioOriginal * cantidad) : null;
+        const importe = notaCredito && importeOriginal != null ? Math.abs(importeOriginal) : importeOriginal;
         return {
           ProductoCodigo: toStringOrNull(row.PRODUCTO),
           Precio: precio,
@@ -226,14 +332,15 @@ function buildPedidos(rows, defaults = {}) {
           PrecioTipo: 0,
           Descuento1: toNumberOrNull(row.DESCUENTO1) ?? 0,
           Descuento2: toNumberOrNull(row.DESCUENTO2) ?? 0,
-          ImporteExento: precio != null && cantidad != null ? round2(precio * cantidad) : null,
+          ImporteExento: tasa == null || tasa === 0 ? importe : 0,
         };
       }),
-      PuntoVentaItemsTarjeta: pagoTarjetaVisa
+      Conceptos: conceptos,
+      PuntoVentaItemsTarjeta: pagoTarjeta
         ? [
             {
               OperacionBancariaCodigo: condicionPago,
-              CuentaCodigo: CONFIG.TARJETA_VISA.CUENTA,
+              CuentaCodigo: CONFIG.TARJETA.CUENTA,
               Descripcion: toStringOrNull(head.COMPROBANTEADICIONAL),
               FechaCupon: fechaPago,
               FechaVencimientoTarjeta: fechaPago,
@@ -253,7 +360,7 @@ function buildPedidos(rows, defaults = {}) {
             },
           ]
         : null,
-      PuntoVentaItemsOtros: pagoTarjetaVisa || pagoContado || cuentaCorriente
+      PuntoVentaItemsOtros: pagoTarjeta || pagoContado || cuentaCorriente
         ? null
         : [
             {
@@ -268,8 +375,8 @@ function buildPedidos(rows, defaults = {}) {
           ? [{ MonedaCodigo: toStringOrNull(head.MONEDA_COTIZACION), Cotizacion: toNumberOrNull(head.COTIZACION) }]
           : null,
       Vuelto: '0.00',
-      TotalBruto: total.toFixed(2),
-      TotalConceptos: '0.00',
+      TotalBruto: totalBruto.toFixed(2),
+      TotalConceptos: totalConceptos.toFixed(2),
       Total: total.toFixed(2),
       TotalRetenciones: '0',
       TotalPagos: total.toFixed(2),
